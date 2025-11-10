@@ -2,7 +2,7 @@ import math
 import random
 import sys
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pygame
 
@@ -369,6 +369,37 @@ class Player:
         py = int(self.y)
         facing = self.facing
 
+        hull_color = (92, 58, 30)
+        trim_color = (180, 132, 92)
+        hull_rect = pygame.Rect(0, 0, 72, 20)
+        hull_rect.center = (px, py + 24)
+        pygame.draw.ellipse(surf, hull_color, hull_rect)
+        pygame.draw.ellipse(surf, trim_color, hull_rect.inflate(-12, -6), 3)
+
+        bow = [
+            (hull_rect.right - 4, hull_rect.centery - 10),
+            (hull_rect.right + 10, hull_rect.centery),
+            (hull_rect.right - 4, hull_rect.centery + 10),
+        ]
+        pygame.draw.polygon(surf, hull_color, bow)
+
+        stern = [
+            (hull_rect.left + 4, hull_rect.centery - 10),
+            (hull_rect.left - 10, hull_rect.centery - 4),
+            (hull_rect.left + 4, hull_rect.centery + 10),
+        ]
+        pygame.draw.polygon(surf, hull_color, stern)
+
+        mast = pygame.Rect(0, 0, 6, 32)
+        mast.center = (px, py)
+        pygame.draw.rect(surf, (158, 188, 210), mast, border_radius=3)
+        pennant = [
+            (mast.right, mast.top + 6),
+            (mast.right + 18, mast.top + 10),
+            (mast.right, mast.top + 16),
+        ]
+        pygame.draw.polygon(surf, (230, 90, 96), pennant)
+
         body_rect = pygame.Rect(0, 0, 18, 26)
         body_rect.center = (px, py)
         pygame.draw.rect(surf, coat_color, body_rect, border_radius=4)
@@ -413,6 +444,47 @@ class Player:
         self.last_combo_time = 0.0
 
 
+class Buoy:
+    def __init__(self, x: float, y: float):
+        self.base_x = x
+        self.x = x
+        self.y = y
+        self.phase = random.uniform(0, math.pi * 2)
+
+    def update(self, dt: float, phase: float, t: float) -> None:
+        self.phase += dt * 1.6
+        drift = math.sin(self.phase * 0.7) * 18
+        self.x = self.base_x + drift
+        crest = generate_wave_y(self.x, phase, t)
+        self.y = crest - 28 + math.sin(self.phase * 1.5) * 5
+
+    def draw(self, surf: pygame.Surface) -> None:
+        pole_color = (200, 220, 230)
+        float_color = (248, 160, 48)
+        band_color = (230, 64, 64)
+
+        px = int(self.x)
+        py = int(self.y)
+
+        pygame.draw.line(surf, pole_color, (px, py - 40), (px, py - 10), 4)
+        pygame.draw.circle(surf, pole_color, (px, py - 48), 6)
+        pygame.draw.circle(surf, (240, 200, 72), (px, py - 48), 3)
+
+        body_rect = pygame.Rect(0, 0, 38, 24)
+        body_rect.center = (px, py)
+        pygame.draw.ellipse(surf, float_color, body_rect)
+        pygame.draw.ellipse(surf, band_color, body_rect.inflate(-6, -12))
+
+        glow = pygame.Surface((70, 70), pygame.SRCALPHA)
+        pygame.draw.circle(glow, (240, 200, 72, 90), (35, 35), 30)
+        surf.blit(glow, glow.get_rect(center=(px, py - 42)))
+
+    def collected_by(self, px: float, py: float) -> bool:
+        dx = px - self.x
+        dy = (py + 10) - self.y
+        return dx * dx + dy * dy <= 40 ** 2
+
+
 @dataclass
 class ComboPopup:
     text: pygame.Surface
@@ -444,6 +516,11 @@ class Game:
         self.paused = False
         self.pause_rect = pygame.Rect(WIDTH - 160, 30, 120, 36)
         self.pending_shot = False
+        self.pending_pulse = False
+        self.high_score = 0
+        self.buoy: Optional[Buoy] = None
+        self.awaiting_buoy = False
+        self.spawner_phase = 0.0
         self.reset()
 
     def _build_sky(self) -> pygame.Surface:
@@ -477,6 +554,11 @@ class Game:
         self.stage_banner_timer = 3.0
         self.stage_banner_text = f"Stage {self.stage}: Dawn Swell"
         self.spawn_interval = ENEMY_SPAWN_EVERY
+        self.pending_shot = False
+        self.pending_pulse = False
+        self.buoy = None
+        self.awaiting_buoy = False
+        self.spawner_phase = 0.0
 
     def spawn_enemy_wave(self):
         stage_factor = min(self.stage, 10)
@@ -491,6 +573,21 @@ class Game:
             variant = random.choices(variants, weights=weights)[0]
             enemy = Enemy(start_x + i * spacing, base_speed * random.uniform(0.9, 1.1), variant)
             self.enemies.append(enemy)
+
+        spawner_x = WIDTH - 48
+        spawner_y = generate_wave_y(WIDTH + 20, self.phase, self.runtime)
+        for _ in range(8):
+            ang = random.uniform(-0.4, 0.4)
+            speed = random.uniform(90, 140)
+            self.particles.append(
+                Particle(
+                    spawner_x + random.uniform(-10, 10),
+                    spawner_y - random.uniform(10, 30),
+                    -speed * abs(math.cos(ang)),
+                    -speed * math.sin(ang),
+                    life=0.8,
+                )
+            )
 
     def _goal_for_stage(self, stage: int) -> int:
         return 5 + stage * 3
@@ -526,8 +623,6 @@ class Game:
                     self.state = "gameplay"
                 elif event.key == pygame.K_p:
                     self.paused = not self.paused
-                elif event.key == pygame.K_f:
-                    self.pending_shot = True
                 elif event.key == pygame.K_ESCAPE:
                     self.paused = not self.paused
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -535,6 +630,8 @@ class Game:
                     self.paused = not self.paused
                 else:
                     self.pending_shot = True
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                self.pending_pulse = True
         return True
 
     def update(self, dt: float):
@@ -544,6 +641,7 @@ class Game:
 
         if self.state != "gameplay":
             self.pending_shot = False
+            self.pending_pulse = False
             return
 
         if self.stage_banner_timer > 0:
@@ -552,10 +650,12 @@ class Game:
 
         if self.paused:
             self.pending_shot = False
+            self.pending_pulse = False
             return
 
         self.runtime += dt
         self.phase += WAVE_SPEED * dt
+        self.spawner_phase = (self.spawner_phase + dt) % (math.pi * 2)
 
         keys = pygame.key.get_pressed()
 
@@ -565,14 +665,12 @@ class Game:
         self.pending_shot = False
 
         self.pulse_energy = min(PULSE_ENERGY_MAX, self.pulse_energy + dt * 8)
-        if (
-            (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
-            and self.pulse_energy >= PULSE_ENERGY_MAX
-        ):
+        if self.pending_pulse and self.pulse_energy >= PULSE_ENERGY_MAX:
             self.pulses.append(Pulse(self.player.x, self.player.y))
             self.pulse_energy = 0.0
             if self.pulse_sound:
                 self.pulse_sound.play()
+        self.pending_pulse = False
 
         mesh = build_wave_mesh(self.phase, self.runtime)
         self.wave_mesh = mesh
@@ -592,6 +690,9 @@ class Game:
 
         for harpoon in self.harpoons:
             harpoon.update(dt)
+
+        if self.buoy:
+            self.buoy.update(dt, self.phase, self.runtime)
 
         for enemy in self.enemies:
             if not enemy.alive:
@@ -651,6 +752,9 @@ class Game:
             particle.update(dt)
         self.particles = [particle for particle in self.particles if particle.life > 0]
 
+        if self.buoy and self.buoy.collected_by(self.player.x, self.player.y):
+            self._advance_stage()
+
         for popup in self.combo_popups:
             popup.update(dt)
         self.combo_popups = [popup for popup in self.combo_popups if popup.ttl > 0]
@@ -661,6 +765,8 @@ class Game:
 
         if self.player.health <= 0 and self.state != "game_over":
             self.state = "game_over"
+
+        self.high_score = max(self.high_score, int(self.player.score))
 
     def fire_harpoon(self) -> None:
         direction = self.player.facing or 1
@@ -674,13 +780,29 @@ class Game:
             self.spawn_interval = max(0.55, ENEMY_SPAWN_EVERY - 0.08 * 9)
             self.kills_this_stage = min(self.kills_this_stage, self.stage_goal)
             return
+        if self.awaiting_buoy:
+            self.kills_this_stage = min(self.kills_this_stage, self.stage_goal)
+            return
         if self.kills_this_stage >= self.stage_goal:
-            self.stage += 1
-            self.kills_this_stage = 0
-            self.stage_goal = self._goal_for_stage(self.stage)
+            self.kills_this_stage = self.stage_goal
+            buoy_x = WIDTH * 0.45 + random.uniform(-60, 60)
+            buoy_y = generate_wave_y(buoy_x, self.phase, self.runtime) - 30
+            self.buoy = Buoy(buoy_x, buoy_y)
+            self.awaiting_buoy = True
             self.stage_banner_timer = 3.2
-            self.stage_banner_text = f"Stage {self.stage}: {self._stage_name(self.stage)}"
-            self.spawn_interval = max(0.6, ENEMY_SPAWN_EVERY - 0.08 * (self.stage - 1))
+            self.stage_banner_text = "Collect the signal buoy!"
+
+    def _advance_stage(self) -> None:
+        if not self.awaiting_buoy:
+            return
+        self.awaiting_buoy = False
+        self.buoy = None
+        self.stage += 1
+        self.kills_this_stage = 0
+        self.stage_goal = self._goal_for_stage(self.stage)
+        self.stage_banner_timer = 3.2
+        self.stage_banner_text = f"Stage {self.stage}: {self._stage_name(self.stage)}"
+        self.spawn_interval = max(0.6, ENEMY_SPAWN_EVERY - 0.08 * (self.stage - 1))
 
     def draw_background(self):
         self.screen.blit(self.sky_surface, (0, 0))
@@ -701,6 +823,27 @@ class Game:
             pygame.draw.polygon(glow_surface, (*WATER_GLOW, 90), poly)
             self.screen.blit(glow_surface, (0, 0))
 
+        spawner_x = WIDTH - 48
+        spawner_y = generate_wave_y(WIDTH + 20, self.phase, self.runtime)
+        swirl_surface = pygame.Surface((120, 120), pygame.SRCALPHA)
+        center = (60, 70)
+        for i in range(4):
+            radius = 50 - i * 10 + math.sin(self.runtime * 2 + i) * 3
+            alpha = 60 + i * 30
+            pygame.draw.circle(
+                swirl_surface,
+                (32, 180, 240, alpha),
+                center,
+                int(max(8, radius)),
+                3,
+            )
+        for i in range(3):
+            angle = self.spawner_phase * 2 + i * 2.2
+            offset = pygame.Vector2(math.sin(angle) * 24, math.cos(angle) * 10)
+            bubble_pos = (center[0] + offset.x, center[1] + offset.y - 28)
+            pygame.draw.circle(swirl_surface, (180, 236, 255, 180 - i * 40), bubble_pos, 6 - i)
+        self.screen.blit(swirl_surface, (spawner_x - 60, spawner_y - 80))
+
     def draw_ui(self):
         panel = pygame.Surface((WIDTH, 110), pygame.SRCALPHA)
         pygame.draw.rect(panel, UI_PANEL, (12, 10, WIDTH - 24, 92), border_radius=18)
@@ -708,13 +851,16 @@ class Game:
         score_txt = self.font.render(f"Score {int(self.player.score):07d}", True, UI_TEXT)
         panel.blit(score_txt, (28, 24))
 
+        best_txt = self.font.render(f"Session Best {self.high_score:07d}", True, UI_MUTED)
+        panel.blit(best_txt, (28, 54))
+
         combo_txt = self.font.render(f"Combo x{self.player.combo:02d}", True, UI_ACCENT)
-        panel.blit(combo_txt, (28, 54))
+        panel.blit(combo_txt, (200, 24))
 
         best_combo_txt = self.font.render(
             f"Best x{self.player.best_combo:02d}", True, UI_MUTED
         )
-        panel.blit(best_combo_txt, (180, 54))
+        panel.blit(best_combo_txt, (200, 54))
 
         stage_ratio = min(1.0, self.kills_this_stage / self.stage_goal)
         stage_name = self._stage_name(self.stage)
@@ -727,9 +873,11 @@ class Game:
         fill_rect = progress_rect.copy()
         fill_rect.width = int(progress_rect.width * stage_ratio)
         pygame.draw.rect(panel, UI_ACCENT, fill_rect, border_radius=9)
-        kill_txt = self.font.render(
-            f"{self.kills_this_stage}/{self.stage_goal} fish", True, UI_MUTED
-        )
+        if self.awaiting_buoy:
+            status = "Collect buoy"
+        else:
+            status = f"{self.kills_this_stage}/{self.stage_goal} fish"
+        kill_txt = self.font.render(status, True, UI_MUTED)
         panel.blit(kill_txt, (progress_rect.x + progress_rect.width + 14, 54))
 
         pulse_ratio = self.pulse_energy / PULSE_ENERGY_MAX
@@ -757,7 +905,7 @@ class Game:
             )
 
         control_txt = self.font.render(
-            "A/D Move  •  Space Jump  •  F Harpoon  •  Shift Pulse  •  P Pause",
+            "A/D Move  •  Space Jump  •  L-Click Harpoon  •  R-Click Pulse  •  P Pause",
             True,
             UI_MUTED,
         )
@@ -808,6 +956,9 @@ class Game:
 
         for particle in self.particles:
             particle.draw(self.screen)
+
+        if self.buoy:
+            self.buoy.draw(self.screen)
 
         for enemy in self.enemies:
             enemy.draw(self.screen)
