@@ -10,22 +10,22 @@ import pygame
 WIDTH, HEIGHT = 960, 540
 FPS = 60
 WATERLINE = HEIGHT * 0.62
-WAVE_POINTS = 140          # fidelity of the water mesh
-WAVE_SPEED = 0.9           # global wave phase speed
-BASE_AMPLITUDE = 42        # base wave height
-AMPLITUDE_SWAY = 26        # extra amplitude that swells over time
-WAVELENGTH = 240           # distance between crests
+WAVE_POINTS = 160          # fidelity of the water mesh
+WAVE_SPEED = 0.95          # global wave phase speed
+BASE_AMPLITUDE = 46        # base wave height
+AMPLITUDE_SWAY = 30        # extra amplitude that swells over time
+WAVELENGTH = 220           # distance between crests
 
 PLAYER_RADIUS = 14
-PLAYER_ACCEL = 0.55
-PLAYER_FRICTION = 0.88
 PLAYER_GRAVITY = 0.75
 JUMP_VELOCITY = -12
+DOUBLE_JUMP_MULTIPLIER = 2.0
+DOUBLE_TAP_WINDOW = 0.28
 
 ENEMY_COLOR = (64, 200, 255)
-ENEMY_SPAWN_EVERY = 1.35   # seconds between enemy waves
-ENEMY_MIN_SPEED = 2.6
-ENEMY_MAX_SPEED = 4.9
+ENEMY_SPAWN_EVERY = 1.25   # seconds between enemy waves
+ENEMY_MIN_SPEED = 2.8
+ENEMY_MAX_SPEED = 5.2
 ENEMY_RADIUS = 14
 
 PULSE_COLOR = (120, 220, 255)
@@ -36,6 +36,11 @@ PULSE_GAIN_ON_HIT = 28
 
 HARPOON_SPEED = 620
 HARPOON_COOLDOWN = 0.45
+
+BUOY_DRIFT_SPEED = 36
+
+SPECIAL_CATCH_CHANCE = 0.22
+SPECIAL_MAX_STOCK = 5
 
 BACKGROUND_TOP = (6, 26, 48)
 BACKGROUND_BOTTOM = (4, 10, 22)
@@ -279,9 +284,9 @@ class Enemy:
 
 class Player:
     def __init__(self):
-        self.x = WIDTH * 0.25
+        self.anchor_x = WIDTH * 0.3
+        self.x = self.anchor_x
         self.y = WATERLINE - 40
-        self.vx = 0.0
         self.vy = 0.0
         self.on_water = True
         self.health = 3
@@ -292,47 +297,41 @@ class Player:
         self.last_combo_time = 0.0
         self.facing = 1
 
-    def update(self, dt: float, keys, phase: float, t: float, particles: List[Particle]):
-        ax = 0.0
-        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-            ax -= PLAYER_ACCEL
-        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-            ax += PLAYER_ACCEL
-        self.vx += ax * 60 * dt
-        self.vx *= PLAYER_FRICTION
-        self.x += self.vx
-        self.x = max(12, min(WIDTH - 12, self.x))
-
-        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-            self.facing = -1
-        elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-            self.facing = 1
-        elif abs(self.vx) > 0.2:
-            self.facing = 1 if self.vx > 0 else -1
-
+    def update(
+        self,
+        dt: float,
+        phase: float,
+        t: float,
+        particles: List[Particle],
+        jump_request: Optional[str],
+    ) -> None:
+        self.x = self.anchor_x
         wave_y = generate_wave_y(self.x, phase, t)
         target = wave_y - 22
 
         if self.on_water:
             dy = target - self.y
             self.vy += dy * 10 * dt
-            if abs(self.vx) > 3 and random.random() < 0.5 * dt:
-                ang = random.uniform(-0.7, 0.7)
+        else:
+            self.vy += PLAYER_GRAVITY
+
+        if jump_request and self.on_water:
+            boost = DOUBLE_JUMP_MULTIPLIER if jump_request == "double" else 1.0
+            self.vy = JUMP_VELOCITY * boost
+            self.on_water = False
+            spray = 10 if boost > 1.0 else 6
+            for _ in range(spray):
+                ang = random.uniform(-1.2, 1.2)
+                magnitude = 90 if boost > 1.0 else 70
                 particles.append(
                     Particle(
                         self.x,
                         wave_y,
-                        60 * math.cos(ang),
-                        -60 * abs(math.sin(ang)),
-                        life=0.6,
+                        magnitude * math.cos(ang),
+                        -magnitude * abs(math.sin(ang)),
+                        life=0.9,
                     )
                 )
-        else:
-            self.vy += PLAYER_GRAVITY
-
-        if (keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP]) and self.on_water:
-            self.vy = JUMP_VELOCITY
-            self.on_water = False
 
         self.y += self.vy * dt * 60
 
@@ -340,15 +339,15 @@ class Player:
             self.y = target
             self.vy = 0.0
             self.on_water = True
-            for _ in range(6):
-                ang = random.uniform(-1.2, 1.2)
+            for _ in range(5):
+                ang = random.uniform(-1.1, 1.1)
                 particles.append(
                     Particle(
                         self.x,
                         wave_y,
-                        90 * math.cos(ang),
-                        -90 * abs(math.sin(ang)),
-                        life=0.9,
+                        85 * math.cos(ang),
+                        -85 * abs(math.sin(ang)),
+                        life=0.85,
                     )
                 )
 
@@ -357,6 +356,8 @@ class Player:
 
         self.score += dt * 4 * (1 + self.combo * 0.02)
         self.last_combo_time += dt
+        mx = pygame.mouse.get_pos()[0]
+        self.facing = 1 if mx >= self.x else -1
 
     def draw(self, surf: pygame.Surface) -> None:
         flicker = self.iframes > 0 and int(pygame.time.get_ticks() * 0.02) % 2 == 0
@@ -445,18 +446,23 @@ class Player:
 
 
 class Buoy:
-    def __init__(self, x: float, y: float):
+    def __init__(self, x: float, y: float, target_x: float):
         self.base_x = x
         self.x = x
         self.y = y
+        self.target_x = target_x
         self.phase = random.uniform(0, math.pi * 2)
 
     def update(self, dt: float, phase: float, t: float) -> None:
         self.phase += dt * 1.6
-        drift = math.sin(self.phase * 0.7) * 18
+        direction = -1 if self.base_x > self.target_x else 1
+        self.base_x += direction * BUOY_DRIFT_SPEED * dt
+        self.base_x = lerp(self.base_x, self.target_x, 0.4 * dt)
+        drift = math.sin(self.phase * 0.7) * 22
         self.x = self.base_x + drift
         crest = generate_wave_y(self.x, phase, t)
-        self.y = crest - 28 + math.sin(self.phase * 1.5) * 5
+        crest += math.sin((t + self.phase) * 1.8) * 6
+        self.y = crest - 30 + math.sin(self.phase * 1.5) * 5
 
     def draw(self, surf: pygame.Surface) -> None:
         pole_color = (200, 220, 230)
@@ -485,6 +491,38 @@ class Buoy:
         return dx * dx + dy * dy <= 40 ** 2
 
 
+class SpecialCatch:
+    def __init__(self, x: float, y: float):
+        self.x = x
+        self.y = y
+        self.phase = random.uniform(0, math.pi * 2)
+        self.float_offset = random.uniform(-18, 18)
+        self.collected = False
+
+    def update(self, dt: float, phase: float, t: float, target_x: float) -> None:
+        self.phase += dt * 2.4
+        self.x += (target_x - self.x) * dt * 2.0
+        crest = generate_wave_y(self.x, phase, t)
+        wobble = math.sin(self.phase) * 8
+        self.y = crest - 26 + wobble + self.float_offset
+
+    def collected_by(self, px: float, py: float) -> bool:
+        if self.collected:
+            return False
+        dx = px - self.x
+        dy = (py - 8) - self.y
+        if dx * dx + dy * dy <= 26 ** 2:
+            self.collected = True
+        return self.collected
+
+    def draw(self, surf: pygame.Surface) -> None:
+        glow = pygame.Surface((40, 40), pygame.SRCALPHA)
+        pygame.draw.circle(glow, (140, 220, 255, 110), (20, 20), 18)
+        pygame.draw.circle(glow, (240, 255, 170, 190), (20, 20), 10)
+        pygame.draw.circle(glow, (255, 255, 255, 220), (20, 20), 6)
+        surf.blit(glow, glow.get_rect(center=(int(self.x), int(self.y))))
+
+
 @dataclass
 class ComboPopup:
     text: pygame.Surface
@@ -510,17 +548,23 @@ class Game:
         self.hit_sound = create_tone(220, duration=0.18, volume=0.5)
         self.pulse_sound = create_tone(660, duration=0.1, volume=0.35)
         self.score_sound = create_tone(440, duration=0.12, volume=0.4)
+        self.special_sound = create_tone(880, duration=0.16, volume=0.35)
 
         self.state = "intro"
         self.state_timer = 0.0
         self.paused = False
-        self.pause_rect = pygame.Rect(WIDTH - 160, 30, 120, 36)
+        self.pause_rect = pygame.Rect(WIDTH - 132, 96, 100, 32)
         self.pending_shot = False
         self.pending_pulse = False
+        self.pending_special = False
         self.high_score = 0
         self.buoy: Optional[Buoy] = None
         self.awaiting_buoy = False
         self.spawner_phase = 0.0
+        self.special_catches: List[SpecialCatch] = []
+        self.special_stock = 0
+        self.jump_request: Optional[str] = None
+        self.last_space_press = -10.0
         self.reset()
 
     def _build_sky(self) -> pygame.Surface:
@@ -539,6 +583,7 @@ class Game:
         self.particles: List[Particle] = []
         self.pulses: List[Pulse] = []
         self.harpoons: List[Harpoon] = []
+        self.special_catches = []
         self.spawn_timer = 0.0
         self.shoot_timer = 0.0
         self.pulse_energy = PULSE_ENERGY_MAX * 0.6
@@ -556,22 +601,27 @@ class Game:
         self.spawn_interval = ENEMY_SPAWN_EVERY
         self.pending_shot = False
         self.pending_pulse = False
+        self.pending_special = False
         self.buoy = None
         self.awaiting_buoy = False
         self.spawner_phase = 0.0
+        self.special_stock = 0
+        self.jump_request = None
+        self.last_space_press = -10.0
 
     def spawn_enemy_wave(self):
-        stage_factor = min(self.stage, 10)
-        n = random.randint(2, 3 + stage_factor // 3)
-        spacing = random.randint(26, 44)
+        stage_factor = min(self.stage, 12)
+        n = random.randint(3, 4 + stage_factor // 2)
+        spacing = random.randint(22, 40)
         start_x = WIDTH + 50
-        speed_boost = 1.0 + (stage_factor - 1) * 0.08
+        speed_boost = 1.05 + (stage_factor - 1) * 0.085
         base_speed = random.uniform(ENEMY_MIN_SPEED, ENEMY_MAX_SPEED) * speed_boost
         variants = ["standard", "hopper", "diver", "charger"]
-        weights = [0.5, 0.2, 0.2, min(0.15 + 0.02 * stage_factor, 0.35)]
+        weights = [0.45, 0.22, 0.2, min(0.18 + 0.025 * stage_factor, 0.42)]
         for i in range(n):
             variant = random.choices(variants, weights=weights)[0]
-            enemy = Enemy(start_x + i * spacing, base_speed * random.uniform(0.9, 1.1), variant)
+            jitter = random.uniform(0.88, 1.12)
+            enemy = Enemy(start_x + i * spacing, base_speed * jitter, variant)
             self.enemies.append(enemy)
 
         spawner_x = WIDTH - 48
@@ -583,14 +633,14 @@ class Game:
                 Particle(
                     spawner_x + random.uniform(-10, 10),
                     spawner_y - random.uniform(10, 30),
-                    -speed * abs(math.cos(ang)),
+                    -speed * abs(math.cos(ang)) * random.uniform(0.8, 1.1),
                     -speed * math.sin(ang),
                     life=0.8,
                 )
             )
 
     def _goal_for_stage(self, stage: int) -> int:
-        return 5 + stage * 3
+        return 8 + stage * 4
 
     def _stage_name(self, stage: int) -> str:
         names = [
@@ -617,7 +667,18 @@ class Game:
             if event.type == pygame.QUIT:
                 return False
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:
+                if event.key == pygame.K_SPACE:
+                    now = pygame.time.get_ticks() / 1000.0
+                    if now - self.last_space_press <= DOUBLE_TAP_WINDOW:
+                        self.jump_request = "double"
+                    else:
+                        self.jump_request = "single"
+                    self.last_space_press = now
+                elif event.key in (pygame.K_w, pygame.K_UP):
+                    self.jump_request = "single"
+                elif event.key == pygame.K_f:
+                    self.pending_special = True
+                elif event.key == pygame.K_r:
                     self.reset()
                 elif event.key == pygame.K_RETURN and self.state == "intro":
                     self.state = "gameplay"
@@ -642,6 +703,7 @@ class Game:
         if self.state != "gameplay":
             self.pending_shot = False
             self.pending_pulse = False
+            self.pending_special = False
             return
 
         if self.stage_banner_timer > 0:
@@ -651,13 +713,12 @@ class Game:
         if self.paused:
             self.pending_shot = False
             self.pending_pulse = False
+            self.pending_special = False
             return
 
         self.runtime += dt
         self.phase += WAVE_SPEED * dt
         self.spawner_phase = (self.spawner_phase + dt) % (math.pi * 2)
-
-        keys = pygame.key.get_pressed()
 
         self.shoot_timer = max(0.0, self.shoot_timer - dt)
         if self.pending_shot and self.shoot_timer <= 0.0:
@@ -675,7 +736,9 @@ class Game:
         mesh = build_wave_mesh(self.phase, self.runtime)
         self.wave_mesh = mesh
 
-        self.player.update(dt, keys, self.phase, self.runtime, self.particles)
+        jump = self.jump_request
+        self.jump_request = None
+        self.player.update(dt, self.phase, self.runtime, self.particles, jump)
 
         self.spawn_timer += dt
         if self.spawn_timer >= self.spawn_interval:
@@ -693,6 +756,9 @@ class Game:
 
         if self.buoy:
             self.buoy.update(dt, self.phase, self.runtime)
+
+        for catch in self.special_catches:
+            catch.update(dt, self.phase, self.runtime, self.player.x)
 
         for enemy in self.enemies:
             if not enemy.alive:
@@ -723,6 +789,7 @@ class Game:
                             PULSE_ENERGY_MAX, self.pulse_energy + PULSE_GAIN_ON_HIT
                         )
                         self.kills_this_stage += 1
+                        self._maybe_spawn_special(enemy.x, enemy.y)
                         if self.score_sound:
                             self.score_sound.play()
                         self._check_stage_progression()
@@ -739,6 +806,7 @@ class Game:
                         PULSE_ENERGY_MAX, self.pulse_energy + PULSE_GAIN_ON_HIT * 0.5
                     )
                     self.kills_this_stage += 1
+                    self._maybe_spawn_special(enemy.x, enemy.y)
                     self._check_stage_progression()
                     if self.score_sound:
                         self.score_sound.play()
@@ -747,6 +815,7 @@ class Game:
         self.enemies = [enemy for enemy in self.enemies if enemy.alive]
         self.pulses = [pulse for pulse in self.pulses if pulse.alive]
         self.harpoons = [harpoon for harpoon in self.harpoons if harpoon.alive]
+        self.special_catches = [catch for catch in self.special_catches if not catch.collected]
 
         for particle in self.particles:
             particle.update(dt)
@@ -755,9 +824,23 @@ class Game:
         if self.buoy and self.buoy.collected_by(self.player.x, self.player.y):
             self._advance_stage()
 
+        for catch in self.special_catches:
+            if catch.collected_by(self.player.x, self.player.y):
+                if self.special_stock < SPECIAL_MAX_STOCK:
+                    self.special_stock += 1
+                if self.special_sound:
+                    self.special_sound.play()
+                self.add_combo_popup("Tidal Relic", self.player.x, self.player.y - 40)
+
+        self.special_catches = [catch for catch in self.special_catches if not catch.collected]
+
         for popup in self.combo_popups:
             popup.update(dt)
         self.combo_popups = [popup for popup in self.combo_popups if popup.ttl > 0]
+
+        if self.pending_special and self.special_stock > 0:
+            self._trigger_special_strike()
+        self.pending_special = False
 
         if self.player.last_combo_time > 4.0 and self.player.combo > 0:
             self.player.combo = max(0, self.player.combo - 1)
@@ -777,7 +860,7 @@ class Game:
 
     def _check_stage_progression(self) -> None:
         if self.stage >= 10:
-            self.spawn_interval = max(0.55, ENEMY_SPAWN_EVERY - 0.08 * 9)
+            self.spawn_interval = max(0.45, ENEMY_SPAWN_EVERY - 0.1 * 9)
             self.kills_this_stage = min(self.kills_this_stage, self.stage_goal)
             return
         if self.awaiting_buoy:
@@ -785,9 +868,9 @@ class Game:
             return
         if self.kills_this_stage >= self.stage_goal:
             self.kills_this_stage = self.stage_goal
-            buoy_x = WIDTH * 0.45 + random.uniform(-60, 60)
+            buoy_x = WIDTH * 0.75 + random.uniform(-40, 40)
             buoy_y = generate_wave_y(buoy_x, self.phase, self.runtime) - 30
-            self.buoy = Buoy(buoy_x, buoy_y)
+            self.buoy = Buoy(buoy_x, buoy_y, self.player.x)
             self.awaiting_buoy = True
             self.stage_banner_timer = 3.2
             self.stage_banner_text = "Collect the signal buoy!"
@@ -802,97 +885,182 @@ class Game:
         self.stage_goal = self._goal_for_stage(self.stage)
         self.stage_banner_timer = 3.2
         self.stage_banner_text = f"Stage {self.stage}: {self._stage_name(self.stage)}"
-        self.spawn_interval = max(0.6, ENEMY_SPAWN_EVERY - 0.08 * (self.stage - 1))
+        self.spawn_interval = max(0.5, ENEMY_SPAWN_EVERY - 0.1 * (self.stage - 1))
+
+    def _maybe_spawn_special(self, x: float, y: float) -> None:
+        if len(self.special_catches) >= SPECIAL_MAX_STOCK:
+            return
+        if random.random() > SPECIAL_CATCH_CHANCE:
+            return
+        spawn_y = y - 10
+        self.special_catches.append(SpecialCatch(x, spawn_y))
+
+    def _trigger_special_strike(self) -> None:
+        self.special_stock = max(0, self.special_stock - 1)
+        if self.special_sound:
+            self.special_sound.play()
+        strike_count = 0
+        for enemy in list(self.enemies):
+            if not enemy.alive:
+                continue
+            enemy.alive = False
+            strike_count += 1
+            self.player.reward_combo(2)
+            reward = 140 + 24 * self.player.combo
+            self.player.score += reward
+            self.add_combo_popup("Tidal Surge!", enemy.x, enemy.y)
+            self.kills_this_stage += 1
+            if strike_count >= 4:
+                break
+        if strike_count > 0:
+            self._check_stage_progression()
+            self.pulses.append(Pulse(self.player.x, self.player.y - 10))
 
     def draw_background(self):
         self.screen.blit(self.sky_surface, (0, 0))
 
     def draw_water(self):
-        poly = [(0, HEIGHT)] + getattr(self, "wave_mesh", []) + [(WIDTH, HEIGHT)]
+        mesh = getattr(self, "wave_mesh", [])
+        poly = [(0, HEIGHT)] + mesh + [(WIDTH, HEIGHT)]
         if len(poly) >= 3:
-            pygame.draw.polygon(self.screen, WATER_BOTTOM, poly)
+            water_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pygame.draw.polygon(water_surface, WATER_BOTTOM, poly)
+            gradient_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            for i in range(40):
+                shade = lerp(0.25, 0.85, i / 40)
+                color = (
+                    int(WATER_TOP[0] * shade),
+                    int(WATER_TOP[1] * shade),
+                    int(WATER_TOP[2] * shade),
+                    int(80 - i * 1.5),
+                )
+                offset_poly = [
+                    (x, y + i * 3)
+                    for x, y in mesh
+                ]
+                pygame.draw.lines(gradient_surface, color, False, offset_poly, 2)
+            water_surface.blit(gradient_surface, (0, 0))
+
             crest = [
                 (
                     x,
-                    y + math.sin((x * 0.01) + self.runtime * 1.4) * 4,
+                    y + math.sin((x * 0.01) + self.runtime * 1.6) * 5,
                 )
-                for x, y in poly[1:-1]
+                for x, y in mesh
             ]
-            pygame.draw.lines(self.screen, WATER_TOP, False, crest, 4)
-            glow_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            pygame.draw.polygon(glow_surface, (*WATER_GLOW, 90), poly)
-            self.screen.blit(glow_surface, (0, 0))
+            pygame.draw.lines(water_surface, (224, 248, 255), False, crest, 3)
 
-        spawner_x = WIDTH - 48
-        spawner_y = generate_wave_y(WIDTH + 20, self.phase, self.runtime)
-        swirl_surface = pygame.Surface((120, 120), pygame.SRCALPHA)
-        center = (60, 70)
-        for i in range(4):
-            radius = 50 - i * 10 + math.sin(self.runtime * 2 + i) * 3
-            alpha = 60 + i * 30
-            pygame.draw.circle(
-                swirl_surface,
-                (32, 180, 240, alpha),
-                center,
-                int(max(8, radius)),
-                3,
+            foam_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            for i in range(2, len(mesh) - 2, 2):
+                prev_y = mesh[i - 2][1]
+                next_y = mesh[i + 2][1]
+                slope = abs(next_y - prev_y)
+                if slope < 14:
+                    px, py = mesh[i]
+                    radius = 8 + (14 - slope) * 0.8
+                    pygame.draw.circle(
+                        foam_surface,
+                        (240, 252, 255, 160),
+                        (int(px), int(py - 6)),
+                        int(radius),
+                    )
+            water_surface.blit(foam_surface, (0, 0))
+
+            glow_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pygame.draw.polygon(glow_surface, (*WATER_GLOW, 80), poly)
+            water_surface.blit(glow_surface, (0, 0))
+
+            self.screen.blit(water_surface, (0, 0))
+
+        spawner_x = WIDTH - 32
+        spawner_y = generate_wave_y(WIDTH + 60, self.phase, self.runtime) - 16
+        curl_surface = pygame.Surface((140, 140), pygame.SRCALPHA)
+        curl_center = (110, 90)
+        for i in range(5):
+            radius = 80 - i * 12 + math.sin(self.runtime * 1.8 + i) * 4
+            width = 5 - i // 2
+            pygame.draw.arc(
+                curl_surface,
+                (180, 236, 255, 160 - i * 20),
+                pygame.Rect(
+                    curl_center[0] - radius,
+                    curl_center[1] - radius,
+                    radius * 2,
+                    radius * 2,
+                ),
+                math.pi * 0.15,
+                math.pi * 1.45,
+                max(2, width),
             )
-        for i in range(3):
-            angle = self.spawner_phase * 2 + i * 2.2
-            offset = pygame.Vector2(math.sin(angle) * 24, math.cos(angle) * 10)
-            bubble_pos = (center[0] + offset.x, center[1] + offset.y - 28)
-            pygame.draw.circle(swirl_surface, (180, 236, 255, 180 - i * 40), bubble_pos, 6 - i)
-        self.screen.blit(swirl_surface, (spawner_x - 60, spawner_y - 80))
+        for i in range(4):
+            angle = self.runtime * 2.2 + i * 1.6
+            offset = pygame.Vector2(math.cos(angle) * 28, math.sin(angle) * 18)
+            bubble_pos = (curl_center[0] - 30 + offset.x, curl_center[1] - 40 + offset.y)
+            pygame.draw.circle(
+                curl_surface,
+                (200, 248, 255, 180 - i * 40),
+                (int(bubble_pos[0]), int(bubble_pos[1])),
+                6 - i,
+            )
+        self.screen.blit(curl_surface, (spawner_x - 90, spawner_y - 80))
 
     def draw_ui(self):
-        panel = pygame.Surface((WIDTH, 110), pygame.SRCALPHA)
-        pygame.draw.rect(panel, UI_PANEL, (12, 10, WIDTH - 24, 92), border_radius=18)
+        panel = pygame.Surface((WIDTH, 136), pygame.SRCALPHA)
+        pygame.draw.rect(panel, UI_PANEL, (12, 10, WIDTH - 24, 116), border_radius=18)
+        pygame.draw.rect(panel, (24, 52, 88), (20, 18, WIDTH - 40, 100), 2, border_radius=16)
 
+        score_block = pygame.Rect(32, 24, 220, 36)
+        pygame.draw.rect(panel, (24, 56, 92), score_block, border_radius=12)
         score_txt = self.font.render(f"Score {int(self.player.score):07d}", True, UI_TEXT)
-        panel.blit(score_txt, (28, 24))
+        panel.blit(score_txt, (score_block.x + 12, score_block.y + 6))
+        best_txt = self.font.render(f"Best {self.high_score:07d}", True, UI_MUTED)
+        panel.blit(best_txt, (score_block.x + 12, score_block.y + 26))
 
-        best_txt = self.font.render(f"Session Best {self.high_score:07d}", True, UI_MUTED)
-        panel.blit(best_txt, (28, 54))
-
-        combo_txt = self.font.render(f"Combo x{self.player.combo:02d}", True, UI_ACCENT)
-        panel.blit(combo_txt, (200, 24))
-
+        combo_block = pygame.Rect(268, 24, 180, 36)
+        pygame.draw.rect(panel, (24, 62, 110), combo_block, border_radius=12)
+        combo_txt = self.font.render(f"Combo ×{self.player.combo:02d}", True, UI_ACCENT)
+        panel.blit(combo_txt, (combo_block.x + 12, combo_block.y + 6))
         best_combo_txt = self.font.render(
-            f"Best x{self.player.best_combo:02d}", True, UI_MUTED
+            f"Peak ×{self.player.best_combo:02d}", True, UI_MUTED
         )
-        panel.blit(best_combo_txt, (200, 54))
+        panel.blit(best_combo_txt, (combo_block.x + 12, combo_block.y + 24))
 
         stage_ratio = min(1.0, self.kills_this_stage / self.stage_goal)
         stage_name = self._stage_name(self.stage)
-        stage_txt = self.font.render(
-            f"Stage {self.stage:02d}/10 — {stage_name}", True, UI_TEXT
+        stage_header = self.font.render(
+            f"Stage {self.stage:02d} — {stage_name}", True, UI_TEXT
         )
-        panel.blit(stage_txt, (320, 24))
-        progress_rect = pygame.Rect(320, 56, 220, 18)
-        pygame.draw.rect(panel, (20, 46, 70), progress_rect, border_radius=9)
+        panel.blit(stage_header, (468, 20))
+        progress_rect = pygame.Rect(468, 48, 260, 18)
+        pygame.draw.rect(panel, (16, 42, 68), progress_rect, border_radius=9)
         fill_rect = progress_rect.copy()
-        fill_rect.width = int(progress_rect.width * stage_ratio)
-        pygame.draw.rect(panel, UI_ACCENT, fill_rect, border_radius=9)
-        if self.awaiting_buoy:
-            status = "Collect buoy"
-        else:
-            status = f"{self.kills_this_stage}/{self.stage_goal} fish"
+        fill_rect.width = max(6, int(progress_rect.width * stage_ratio))
+        pygame.draw.rect(panel, (96, 222, 255), fill_rect, border_radius=9)
+        status = "Collect buoy" if self.awaiting_buoy else f"{self.kills_this_stage}/{self.stage_goal} catches"
         kill_txt = self.font.render(status, True, UI_MUTED)
-        panel.blit(kill_txt, (progress_rect.x + progress_rect.width + 14, 54))
+        panel.blit(kill_txt, (progress_rect.x, progress_rect.bottom + 6))
 
         pulse_ratio = self.pulse_energy / PULSE_ENERGY_MAX
-        pulse_rect = pygame.Rect(620, 24, 220, 16)
+        pulse_rect = pygame.Rect(760, 26, 180, 16)
         pygame.draw.rect(panel, (24, 52, 88), pulse_rect, border_radius=9)
         pulse_fill = pulse_rect.copy()
         pulse_fill.width = int(pulse_rect.width * pulse_ratio)
         pygame.draw.rect(panel, (120, 236, 252), pulse_fill, border_radius=9)
-        ready_txt = "READY" if pulse_ratio >= 1.0 else f"Charging {int(pulse_ratio * 100)}%"
-        pulse_label = self.font.render(f"Pulse – {ready_txt}", True, UI_TEXT)
-        panel.blit(pulse_label, (620, 44))
+        ready_txt = "Ready" if pulse_ratio >= 1.0 else f"Charging {int(pulse_ratio * 100)}%"
+        pulse_label = self.font.render(f"Pulse {ready_txt}", True, UI_TEXT)
+        panel.blit(pulse_label, (pulse_rect.x, pulse_rect.y - 22))
 
+        relic_rect = pygame.Rect(960 - 180, 26, 150, 60)
+        pygame.draw.rect(panel, (30, 70, 116), relic_rect, border_radius=14)
+        relic_label = self.font.render("Tidal Relics", True, UI_TEXT)
+        panel.blit(relic_label, (relic_rect.x + 16, relic_rect.y + 6))
+        relic_txt = self.font.render(f"{self.special_stock}/{SPECIAL_MAX_STOCK}", True, UI_ACCENT)
+        panel.blit(relic_txt, (relic_rect.x + 16, relic_rect.y + 30))
+
+        heart_base_x = relic_rect.x - 140
         for i in range(self.player.health):
-            heart_rect = pygame.Rect(0, 0, 18, 16)
-            heart_rect.center = (WIDTH - 170 + i * 26, 42)
+            heart_rect = pygame.Rect(0, 0, 20, 18)
+            heart_rect.center = (heart_base_x + i * 32, 44)
             pygame.draw.polygon(
                 panel,
                 (255, 112, 148),
@@ -905,11 +1073,11 @@ class Game:
             )
 
         control_txt = self.font.render(
-            "A/D Move  •  Space Jump  •  L-Click Harpoon  •  R-Click Pulse  •  P Pause",
+            "Space Jump  •  Double-tap Space High Jump  •  L-Click Harpoon  •  R-Click Pulse  •  F Tidal Surge  •  P Pause",
             True,
             UI_MUTED,
         )
-        panel.blit(control_txt, (28, 82))
+        panel.blit(control_txt, (32, 108))
 
         pygame.draw.rect(panel, (28, 58, 98), self.pause_rect, border_radius=12)
         pygame.draw.rect(panel, UI_ACCENT, self.pause_rect, 2, border_radius=12)
@@ -953,6 +1121,9 @@ class Game:
 
         for harpoon in self.harpoons:
             harpoon.draw(self.screen)
+
+        for catch in self.special_catches:
+            catch.draw(self.screen)
 
         for particle in self.particles:
             particle.draw(self.screen)
