@@ -286,9 +286,8 @@ class Player:
     def __init__(self):
         self.anchor_x = WIDTH * 0.3
         self.x = self.anchor_x
-        self.y = WATERLINE - 40
+        self.y = generate_wave_y(self.anchor_x, 0.0, 0.0) - 22
         self.vy = 0.0
-        self.on_water = True
         self.health = 3
         self.iframes = 0.0
         self.score = 0.0
@@ -297,67 +296,38 @@ class Player:
         self.last_combo_time = 0.0
         self.facing = 1
 
+    def snap_to_wave(self, phase: float, t: float) -> None:
+        target = generate_wave_y(self.anchor_x, phase, t) - 22
+        self.y = target
+        self.vy = 0.0
+
     def update(
         self,
         dt: float,
         phase: float,
         t: float,
-        particles: List[Particle],
-        jump_request: Optional[str],
+        _particles: List[Particle],
+        _jump_request: Optional[str],
     ) -> None:
         self.x = self.anchor_x
         wave_y = generate_wave_y(self.x, phase, t)
         target = wave_y - 22
 
-        if self.on_water:
-            dy = target - self.y
-            self.vy += dy * 10 * dt
-        else:
-            self.vy += PLAYER_GRAVITY
-
-        if jump_request and self.on_water:
-            boost = DOUBLE_JUMP_MULTIPLIER if jump_request == "double" else 1.0
-            self.vy = JUMP_VELOCITY * boost
-            self.on_water = False
-            spray = 10 if boost > 1.0 else 6
-            for _ in range(spray):
-                ang = random.uniform(-1.2, 1.2)
-                magnitude = 90 if boost > 1.0 else 70
-                particles.append(
-                    Particle(
-                        self.x,
-                        wave_y,
-                        magnitude * math.cos(ang),
-                        -magnitude * abs(math.sin(ang)),
-                        life=0.9,
-                    )
-                )
-
+        delta = target - self.y
+        self.vy += delta * 0.12
+        self.vy *= 0.88
         self.y += self.vy * dt * 60
 
-        if not self.on_water and self.y >= target:
+        if abs(delta) < 0.4 and abs(self.vy) < 0.15:
             self.y = target
             self.vy = 0.0
-            self.on_water = True
-            for _ in range(5):
-                ang = random.uniform(-1.1, 1.1)
-                particles.append(
-                    Particle(
-                        self.x,
-                        wave_y,
-                        85 * math.cos(ang),
-                        -85 * abs(math.sin(ang)),
-                        life=0.85,
-                    )
-                )
 
         if self.iframes > 0:
             self.iframes -= dt
 
         self.score += dt * 4 * (1 + self.combo * 0.02)
         self.last_combo_time += dt
-        mx = pygame.mouse.get_pos()[0]
-        self.facing = 1 if mx >= self.x else -1
+        self.facing = 1
 
     def draw(self, surf: pygame.Surface) -> None:
         flicker = self.iframes > 0 and int(pygame.time.get_ticks() * 0.02) % 2 == 0
@@ -608,13 +578,14 @@ class Game:
         self.special_stock = 0
         self.jump_request = None
         self.last_space_press = -10.0
+        self.player.snap_to_wave(self.phase, self.runtime)
 
     def spawn_enemy_wave(self):
         stage_factor = min(self.stage, 12)
         n = random.randint(3, 4 + stage_factor // 2)
         spacing = random.randint(22, 40)
         start_x = WIDTH + 50
-        speed_boost = 1.05 + (stage_factor - 1) * 0.085
+        speed_boost = 0.9 + (stage_factor - 1) * 0.08
         base_speed = random.uniform(ENEMY_MIN_SPEED, ENEMY_MAX_SPEED) * speed_boost
         variants = ["standard", "hopper", "diver", "charger"]
         weights = [0.45, 0.22, 0.2, min(0.18 + 0.025 * stage_factor, 0.42)]
@@ -974,35 +945,92 @@ class Game:
 
         spawner_x = WIDTH - 32
         spawner_y = generate_wave_y(WIDTH + 60, self.phase, self.runtime) - 16
-        curl_surface = pygame.Surface((140, 140), pygame.SRCALPHA)
-        curl_center = (110, 90)
+        curl_surface = pygame.Surface((220, 200), pygame.SRCALPHA)
+        lip_base = 96 + math.sin(self.runtime * 1.2) * 6
+        lip_tip_y = lip_base - 36
+        lip_tip_x = 170 + math.sin(self.runtime * 1.8) * 12
+        fold_bottom = lip_base + 62
+        fold_mid_x = lip_tip_x - 44
+
+        body_color = (28, 108, 176, 235)
+        trough_color = (12, 64, 128, 210)
+        foam_color = (230, 250, 255, 220)
+
+        body_points = [
+            (0, 198),
+            (48, 178),
+            (92, 158),
+            (124, lip_base + 22),
+            (150, lip_base + 4),
+            (fold_mid_x, lip_base + 10),
+            (lip_tip_x, lip_tip_y),
+            (lip_tip_x + 16, lip_tip_y + 28),
+            (lip_tip_x - 10, lip_base + 44),
+            (120, fold_bottom),
+            (64, 200),
+            (0, 200),
+        ]
+        pygame.draw.polygon(curl_surface, body_color, body_points)
+
+        pocket_points = [
+            (fold_mid_x - 26, lip_base + 34),
+            (fold_mid_x, lip_base + 10),
+            (lip_tip_x - 8, lip_base + 24),
+            (lip_tip_x - 34, lip_base + 60),
+            (118, fold_bottom),
+            (72, 196),
+        ]
+        pygame.draw.polygon(curl_surface, trough_color, pocket_points)
+
+        lip_points = [
+            (fold_mid_x - 12, lip_base + 12),
+            (fold_mid_x + 6, lip_base + 6),
+            (lip_tip_x - 4, lip_base - 6),
+            (lip_tip_x + 12, lip_tip_y + 20),
+            (lip_tip_x - 18, lip_base + 32),
+        ]
+        pygame.draw.polygon(curl_surface, foam_color, lip_points)
+
+        highlight_curve = [
+            (fold_mid_x - 14, lip_base + 28),
+            (fold_mid_x + 4, lip_base + 8),
+            (lip_tip_x - 10, lip_base),
+            (lip_tip_x + 8, lip_tip_y + 18),
+        ]
+        pygame.draw.aalines(curl_surface, (248, 255, 255, 210), False, highlight_curve)
+
         for i in range(5):
-            radius = 80 - i * 12 + math.sin(self.runtime * 1.8 + i) * 4
-            width = 5 - i // 2
-            pygame.draw.arc(
-                curl_surface,
-                (180, 236, 255, 160 - i * 20),
-                pygame.Rect(
-                    curl_center[0] - radius,
-                    curl_center[1] - radius,
-                    radius * 2,
-                    radius * 2,
-                ),
-                math.pi * 0.15,
-                math.pi * 1.45,
-                max(2, width),
+            wobble = math.sin(self.runtime * 2.0 + i * 0.8) * 3
+            foam_pos = (
+                lip_tip_x - 24 + i * 10,
+                lip_base + 10 + i * 6 + wobble,
             )
-        for i in range(4):
-            angle = self.runtime * 2.2 + i * 1.6
-            offset = pygame.Vector2(math.cos(angle) * 28, math.sin(angle) * 18)
-            bubble_pos = (curl_center[0] - 30 + offset.x, curl_center[1] - 40 + offset.y)
             pygame.draw.circle(
                 curl_surface,
-                (200, 248, 255, 180 - i * 40),
-                (int(bubble_pos[0]), int(bubble_pos[1])),
-                6 - i,
+                (240, 255, 255, 200 - i * 30),
+                (int(foam_pos[0]), int(foam_pos[1])),
+                max(2, 5 - i),
             )
-        self.screen.blit(curl_surface, (spawner_x - 90, spawner_y - 80))
+
+        spray_surface = pygame.Surface((220, 200), pygame.SRCALPHA)
+        for i in range(6):
+            shade = 160 - i * 18
+            band_points = [
+                (lip_tip_x - 60 + i * 8, lip_base + 46 + i * 10),
+                (lip_tip_x - 14, lip_base + 30 + i * 6),
+                (lip_tip_x + 18, lip_base + 12 + i * 4),
+                (lip_tip_x + 24, lip_tip_y + 36 + i * 14),
+            ]
+            pygame.draw.lines(
+                spray_surface,
+                (200, 244, 255, max(40, shade)),
+                False,
+                band_points,
+                2,
+            )
+        curl_surface.blit(spray_surface, (0, 0))
+
+        self.screen.blit(curl_surface, (spawner_x - 120, spawner_y - 120))
 
     def draw_ui(self):
         panel = pygame.Surface((WIDTH, 136), pygame.SRCALPHA)
